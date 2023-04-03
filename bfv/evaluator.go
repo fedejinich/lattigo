@@ -595,3 +595,68 @@ func evaluateInPlaceUnary(el0, elOut *rlwe.Ciphertext, evaluate func(*ring.Poly,
 		evaluate(el0.Value[i], elOut.Value[i])
 	}
 }
+
+type PastaParams struct {
+	CipherSize int
+	Rounds     int
+}
+
+type SealParams struct {
+	Halfslots int
+}
+
+func (eval *evaluator) PastaDecomp(encryptedMessage []uint64, modulus int, pastaParams PastaParams, sealParams SealParams, secretKey *rlwe.Ciphertext, bfvParams Parameters) []rlwe.Ciphertext {
+	nonce := 123456789
+	size := len(encryptedMessage)
+	numBlock := math.Ceil(float64(size) / float64(pastaParams.CipherSize)) // todo(fedejinich) float?
+	pastaUtil := NewPastaUtil(modulus)
+	result := make([]rlwe.Ciphertext, numBlock)
+
+	for b := 0; b < int(numBlock); b++ {
+		pastaUtil.InitShake(nonce, b)
+		state := secretKey
+
+		// todo(fedejinich) refactor this into (...) = pastaUtil.round(...)
+		for r := 1; r < pastaParams.Rounds; r++ {
+			fmt.Println("round {}", r)
+
+			// todo(fedejinich) can be refactored into (mat1, mat2, rc) = pastaUtil.InitParams()
+			mat1 := pastaUtil.RandomMatrix()
+			mat2 := pastaUtil.RandomMatrix()
+			rc := pastaUtil.RcVec(sealParams.Halfslots)
+
+			matmul(state, mat1, mat2)
+			addRc(state, rc)
+			mix(state)
+			if r == pastaParams.Rounds {
+				pastaUtil.sboxCube(state)
+			} else {
+				pastaUtil.sboxFeistel(state)
+			}
+
+			printNoise(state)
+		}
+
+		// todo(fedejinich) refactor this into (...) = pastaUtil.round(...)
+		fmt.Println("final add")
+		mat1 := pastaUtil.RandomMatrix()
+		mat2 := pastaUtil.RandomMatrix()
+		rc := pastaUtil.RcVec(sealParams.Halfslots)
+		matmul(state, mat1, mat2)
+		addRc(state, rc)
+		mix(state)
+
+		// add cipher
+		offset := b * pastaParams.CipherSize
+		size := math.Min(float64((b+1)*pastaParams.CipherSize), float64(size))
+		ciphertextTemp := encryptedMessage[offset:int(size)] // todo(fedejinich) not completely sure about this
+
+		plaintext := NewPlaintext(bfvParams, bfvParams.MaxLevel()) // todo(fedejinich) not sure about MaxLevel()
+		encoder := NewEncoder(bfvParams)
+		encoder.Encode(ciphertextTemp, plaintext)
+		eval.Neg(state, state)            // todo(fedejinich) ugly
+		eval.Add(state, plaintext, state) // todo(fedejinich) ugly
+		result[b] = *state
+	}
+	return result
+}
